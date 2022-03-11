@@ -1,0 +1,1690 @@
+---
+title: "NFL Injured Reserve Analysis"
+author: "Mike Forzley (mikejforzley@gmail.com)"
+date: "3/10/2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+setwd("D:/Injury analysis/Player Injuries/")
+
+require(tidyverse)
+require(corrplot)
+require(MuMIn)
+require(R2jags)
+require(mcmcplots)
+require(lme4)
+require(knitr)
+require(kableExtra)
+require(gridExtra)
+require(stringr)
+require(forcats)
+
+# read in our data set, we are going to work primarily with customized PFF IDs, so we can remove a bunch of unnecessary columns
+
+df <- read.csv("big.final.csv") %>% dplyr::select(-X, -name_abbr, - team_abbr, - first_name, -last_name, -ID) %>%
+                                    dplyr::rename(ID = player.ID) %>% dplyr::select(ID, everything(.))
+
+head(df)
+
+# Build following data set 
+# make df with percent snaps by year, plus number of weeks on injured reserve in previous year, and number of weeks on injured reserve
+# for current year. Include all other info, position, age, etc. 
+
+# Build sub data sets to merge at the end for analysis 
+
+# Yearly total snaps by player, foundation of data set. First though, update all pre-2022 instances of WFT, because that creates 
+# duplicate records for players on that team when the name changed. ALSO, Los angeles rams and St Louis rams are both included in the OG data
+# change all rams records to LA rams. Same thing with chargers 
+
+df.1 <- df %>% dplyr::mutate(Team = ifelse(Team == "St. Louis Rams", "Los Angeles Rams", Team), 
+                             Team = ifelse(Team == "Washington Redskins", "Washington Football Team", Team), # Commanders now, but I wrote this before the announcement. 
+                             Team = ifelse(Team == "San Diego Chargers", "Los Angeles Chargers", Team)) %>% 
+                distinct(ID, Season, Week, .keep_all = TRUE) %>% dplyr::filter(ID != "a5358") # this player has inaccurate data
+
+snaps <- df.1 %>% dplyr::filter(OVD != "ST") %>% dplyr::group_by(ID, Season) %>% dplyr::summarise(Season.snaps = sum(Total.Snaps))
+
+# Add covariates 
+
+# Sum number of games on IR for each player
+
+IR <- df.1 %>% dplyr::filter(Game_Designation == "Injured Reserve") %>% dplyr::group_by(ID, Season) %>% 
+                          dplyr::summarise(IR.games = n()) %>% dplyr::mutate(IR.factor = 1) 
+
+
+# Okay, now we need to deal with the injury_type data, which are a total mess. For our purposes, we are going to make new columns 
+# for injury types of interest to our analysis. AKA, knees, ankles, Achilles, hamstring, back, neck, groin, 
+
+IR.Inj <- df.1 %>% dplyr::filter(Game_Designation == "Injured Reserve") %>% dplyr::mutate(Injury.cat = NA)
+
+# This is going to be ugly, but these data need to be cleaned in some way to be useful for an analysis 
+
+for (i in 1:length(IR.Inj$Injury_Type)) { 
+  
+  if(grepl("Foot", IR.Inj$Injury_Type[i]))
+  IR.Inj$Injury_Type[i] <- as.character("Foot") 
+  
+  if(grepl("Toe", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Foot") 
+  
+  else if(grepl("Knee", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Knee")
+  
+  else if(grepl("Shoulder", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Shoulder")
+  
+  else if(grepl("Clavicle", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Shoulder")
+  
+  else if(grepl("Collarbone", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Shoulder")
+  
+  else if(grepl("Ankle", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Ankle")
+
+  else if(grepl("Achill", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Achilles")
+  
+  else if(grepl("Abdom", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Abdominal")
+  
+  else if(grepl("Groin", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Groin")
+  
+  else if(grepl("ACL", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Knee")
+  
+  else if(grepl("AcL", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Knee")
+  
+  else if(grepl("Acl", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Knee")
+  
+  else if(grepl("MCL", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Knee")
+  
+  else if(grepl("Tricep", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Arm")
+  
+  else if(grepl("Forearm", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Arm")
+  
+  else if(grepl("Elbow", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Arm")
+  
+  else if(grepl("Wrist", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Arm")
+  
+  else if(grepl("Bicep", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Arm")
+  
+  else if(grepl("Neck", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Spine")
+  
+  else if(grepl("Back", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Spine")
+  
+  else if(grepl("Shin", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Lower.Leg")
+  
+  else if(grepl("Tibia", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Lower.Leg")
+  
+  else if(grepl("Fibula", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Lower.Leg")
+  
+  else if(grepl("Calf", IR.Inj$Injury_Type[i]))
+    IR.Inj$Injury_Type[i] <- as.character("Lower.Leg")
+  
+}
+
+levels(as.factor(IR.Inj$Injury_Type))
+
+# Select last IR injury obs for each player for each season 
+
+last.IR <- IR.Inj %>% dplyr::group_by(ID, Season) %>% dplyr::arrange(ID, Season, Week) %>% slice_tail()
+
+head(last.IR)
+
+# Make factor covs for Achilles, Ankle, Shoulder, Foot, Spine, Hamstring, and Knee injuries based on the last IR-landing injury for each player 
+# in each season. Retain the week column for each "final IR" stint by player/season, which can be used as a covariate showing how late into 
+# the year each player was on IR in the previous season. # Create "other column" for injuries that aren't included in our factors. Just good 
+# housekeeping. There are way too many categories to include in the analysis, but at least we can incorporate the "other" column t partially 
+# incorporate those data. 
+
+last.IR.1 <- last.IR %>% dplyr::mutate(Achilles = ifelse(grepl(Injury_Type, "Achilles") , 1, 0), 
+                                       Knee =  ifelse(grepl(Injury_Type, "Knee") , 1, 0), 
+                                        Foot =  ifelse(grepl(Injury_Type, "Foot") , 1, 0), 
+                                      Spine = ifelse(grepl(Injury_Type, "Spine") , 1, 0), 
+                                      Hamstring = ifelse(grepl(Injury_Type, "Hamstring") , 1, 0), 
+                                      Groin = ifelse(grepl(Injury_Type, "Groin") , 1, 0), 
+                                      Shoulder = ifelse(grepl(Injury_Type, "Shoulder") , 1, 0)) %>% 
+                          dplyr::select(ID, Season, Week, Achilles, Knee, Foot, Spine, Hamstring, Groin, Shoulder) %>% 
+                          dplyr::mutate(Other = ifelse(Achilles == 0 & Knee == 0 & Foot == 0 & Spine == 0 & Hamstring == 0 & 
+                                                         Groin == 0 & Shoulder == 0,1, 0)) %>% dplyr::mutate(Season = Season + 1)
+                                                                                    # Here we are modifying the season column so that 
+                                                                    # IR covariates are matched with the NEXT years snap counts for our analysis.
+                                                                    # IE IR stats from 2014, are paired covs with 2015 snaps 
+
+# Nweeks on IR, >= 5 weeks on IR, >= 10 weeks on IR, etc.
+
+# Get rid of holdout/suspension IR weeks, and then sum number of weeks on IR per season for each player, create factor variables for 
+# >= 1, 5 and 10 weeks on IR for each season. Leave season as is, because these can  be used both as covariates or potential response variables. 
+
+IR.inj.only <- IR.Inj %>% dplyr::filter(!grepl("Suspension|Holdout", Injury_Type)) %>% 
+                            dplyr::group_by(ID, Season) %>% dplyr::summarise(N.IR.Wks = n()) %>% 
+                                        dplyr::mutate(IR.1 = ifelse(N.IR.Wks > 0, 1, 0),
+                                                      IR.5 = ifelse(N.IR.Wks > 4, 1, 0), 
+                                                      IR.10 = ifelse(N.IR.Wks > 9, 1, 0)) %>%
+                                              dplyr::mutate(Season = Season + 1)
+
+# Now make a df of player-level covariates, age to start season, position, offense/defense, weight, 
+
+player.covs <- df.1 %>% dplyr::group_by(ID, Season) %>% dplyr::select(ID, Season, Age_Start_Season, Position, OVD, weight) %>% 
+                                                                      distinct()
+
+# Now combine snaps df with all of the covariate DFS by Name, Season, and Team (cannot just use season and name because there are players
+# with the same name in the data set). DFs IR.inj.only, Last.IR.1, player.covs WITH snaps 
+
+all <- left_join(snaps, player.covs, by = c("ID", "Season")) %>% 
+            left_join(., IR.inj.only, by = c("ID", "Season")) %>% 
+                left_join(., last.IR.1, by = c("ID", "Season")) %>% 
+                      dplyr::mutate(N.IR.Wks = ifelse(is.na(N.IR.Wks), 0, N.IR.Wks), 
+                                    IR.1 = ifelse(is.na(IR.1), 0, IR.1), 
+                                    IR.5 = ifelse(is.na(IR.5), 0, IR.5), 
+                                    IR.10 = ifelse(is.na(IR.10), 0, IR.10), 
+                                   Achilles = ifelse(is.na(Achilles), 0, Achilles), 
+                                   Knee = ifelse(is.na(Knee), 0, Knee), 
+                                   Foot = ifelse(is.na(Foot), 0, Foot), 
+                                   Spine = ifelse(is.na(Spine), 0, Spine), 
+                                   Hamstring = ifelse(is.na(Hamstring), 0, Hamstring), 
+                                   Groin = ifelse(is.na(Groin), 0, Groin), 
+                                   Shoulder = ifelse(is.na(Shoulder), 0, Shoulder), 
+                                   Other = ifelse(is.na(Other), 0, Other)) %>% 
+                        dplyr::rename(Prev.IR.wks = N.IR.Wks, 
+                                      Prev.IR.1 = IR.1, 
+                                      Prev.IR.5 = IR.5, 
+                                      Prev.IR.10 = IR.10) %>% 
+                              dplyr::mutate(Prev.IR.fact = ifelse(Prev.IR.wks > 0, 1, 0))
+
+
+# Okay so now we have all of our IR covariates lined up with snap counts from the subsequent season. BUT we still want to pair IR each seasons IR 
+# data with current season snap counts to use as potential covariates (IE how do last years IR data influence current years IR status for 
+# each player). We will do this with the IR week data, but the injury type data. 
+
+# Take original IR data frame and modify back to original season (added 1 year to each season previously, now subtract one year)
+
+IR.inj.only.2 <- IR.inj.only %>% dplyr::mutate(Season = Season -1, 
+                                               Curr.IR.fact = 1) %>%
+                                dplyr::rename(Curr.IR.wks = N.IR.Wks, 
+                                              Curr.IR.1 = IR.1, 
+                                              Curr.IR.5 = IR.5, 
+                                              Curr.IR.10 = IR.10)
+
+head(IR.inj.only.2)
+
+# Join all and update IR df. Lastly, create cumulative IR covariates, which show the cumulative sum of weeks each player has spent on their
+# career (does not reset each season) plus the cumulative number of consecutive seasons that each player has spent at least one week on IR. 
+
+all.1 <- left_join(all, IR.inj.only.2, by = c("ID", "Season")) %>% 
+                                                      dplyr::mutate(Curr.IR.wks = ifelse(is.na(Curr.IR.wks), 0, Curr.IR.wks), 
+                                                                    Curr.IR.1 = ifelse(is.na(Curr.IR.1), 0, Curr.IR.1), 
+                                                                    Curr.IR.5 = ifelse(is.na(Curr.IR.5), 0, Curr.IR.5), 
+                                                                    Curr.IR.10 = ifelse(is.na(Curr.IR.10), 0, Curr.IR.10), 
+                                                                    Curr.IR.fact = ifelse(is.na(Curr.IR.fact), 0, Curr.IR.fact)) %>% 
+                        dplyr::group_by(ID) %>% dplyr::arrange(ID, Season) %>% 
+                                                                dplyr::mutate(Cum.IR.wks = cumsum(Curr.IR.wks), 
+                                                                      Cum.IR.fact = cumsum(Curr.IR.fact)) %>% 
+                                                        dplyr::mutate(Week = ifelse(is.na(Week), 0, Week))
+
+head(all.1)
+
+# Now we have our final data set. We will have to tweak our data here and there based on which analysis we are doing, as if cannot analyze 
+# data using previous season IR covariates 
+
+# Correlation and colinearity 
+
+cora <- with(na.omit(all.1), cor(data.frame(Season, Season.snaps, Age_Start_Season, weight, Prev.IR.wks, Prev.IR.1, Prev.IR.5, Prev.IR.10, 
+                                            Week, Curr.IR.wks, Curr.IR.1, Curr.IR.5, Curr.IR.10, Cum.IR.wks)))
+
+# PLOT CO LINEARITY !!!
+
+#cor.plot <- corrplot::corrplot(cora,"shade")
+
+# Prev.IR.wks, Prev.IR.5, Prev.IR.10, the week the player last went on IR in the previous season, various factors to describe injuries to specific
+# body parts in the previous season, and cumulative IR weeks a player has spent on IR across seasons
+
+# As mentioned above, we are going to have to tweak our data frame for each specific suite of models. In the case of our snaps models, 
+# we need to remove the first record for each player (IE the earliest season that appears in our data frame), as those data are not associated
+# with any "previous seasons IR data" to use as covariates (that is just the earliest season we have data for). 
+
+# Also, players that never see the field, regardless of their injury/IR status, may confound our ability to analyze trends in our data. Therefore, 
+# we will remove players from our data who have never played more than 200 snaps in a season (within the temporal scope of our data). 
+
+career.stats <- all.1 %>% dplyr::group_by(ID) %>% dplyr::summarise(Sum.snaps = max(Season.snaps)) %>% 
+                                                      dplyr::filter(Sum.snaps > 200)
+
+
+snaps.df <- all.1 %>% dplyr::arrange(ID, Season) %>% dplyr::group_by(ID) %>%
+                                                                          slice(2:n()) %>% dplyr::filter(ID %in% career.stats$ID, 
+                                                                                                         Position != "ST") 
+
+
+
+Curr.IR.df <- all.1 %>% dplyr::arrange(ID, Season) %>% dplyr::group_by(ID) %>%
+  slice(2:n())
+
+Curr.IR.df.1 <- Curr.IR.df %>% dplyr::filter(Position != "ST")
+
+load("RMD.Data.RData")
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE, eval=FALSE}
+
+############## Code below shows model fitting and comparison using dredge. These steps take way too long to run every time I needed to knit a new markdown file, so I instead just load an Rdata file with all of the objects I need from the following code. Including code just for posterity. 
+
+#################### Markdown will not run this code when knitted ####################
+
+###############################################################################################
+
+# build global model, using Gaussian distribution (assumes normally distributed variables) for now. 
+
+global.snaps <- glm(Season.snaps~Age_Start_Season + Position + OVD + weight + Prev.IR.wks + as.factor(Prev.IR.5) + 
+                      as.factor(Prev.IR.10) + Week, data = snaps.df, family = gaussian)
+
+options(na.action = "na.pass") 
+
+summary(global.snaps)
+
+# set global options to NA pass because we already remove NAs from our snaps data and 
+# we cannot dredge models that use different data. 
+
+snap.dredge <- dredge(global.snaps)
+
+snap.dredge
+
+top.snaps <- glm(Season.snaps~Age_Start_Season + Position +  weight + Prev.IR.wks + Prev.IR.10, data = snaps.df, family = gaussian)
+
+summary(top.snaps)
+
+nrow(snap.dredge)
+
+# N Weeks on IR IN current season based on covariates ############### Linear regression 
+################# N WEEKS ON IR IN CURRENT SEASON - LINEAR REGRESSION #################
+
+# Here we will again remove the first record for each player as we did with the "snaps" data frame, because we are interested in how the previous years IR covariates
+# and others influence the number of weeks spend on IR in the current season. 
+
+# still leaves us with plenty of data 
+
+nrow(Curr.IR.df)
+
+# Set up global model where response var is the number of weeks spent on IR in the current season, based on 
+# age, position, offense vs. defense, number of weeks on IR In previous season, weight, factors for 5 or 10 weeks on 
+# IR in the previous season, as well as the last week spent on IR in the previous season. 
+
+global.curr.IR.wks <- glm(Curr.IR.wks~Age_Start_Season + Position + OVD + weight + 
+                            Prev.IR.wks + as.factor(Prev.IR.5) + as.factor(Prev.IR.10) + Week, data = Curr.IR.df, family = gaussian)
+
+Curr.IR.dredge <- dredge(global.curr.IR.wks)
+
+head(Curr.IR.dredge)
+
+nrow(Curr.IR.dredge)
+
+################### CURRENT IR FACTOR BASED ON PREVIOUS IR STATS AND OTHER COVARIATES - LOGISTIC REGRESSION #########################
+###############################################################################################################
+
+# Use the curr.IR.df again 
+
+
+global.curr.IR.binom <- glm(as.factor(Curr.IR.fact) ~ Age_Start_Season + Position + OVD + weight + 
+                              Prev.IR.wks + as.factor(Prev.IR.5) + as.factor(Prev.IR.10) + Week, data = Curr.IR.df, family = "binomial")
+
+
+curr.IR.binom.dredge <- dredge(global.curr.IR.binom)
+
+head(curr.IR.binom.dredge)
+
+################## Current IR five FACTOR - Logistic regression ##################################################
+
+global.curr.IR.5.binom <- glm(as.factor(Curr.IR.5) ~ Age_Start_Season + Position + OVD + weight + 
+                                Prev.IR.wks + as.factor(Prev.IR.5) + as.factor(Prev.IR.10) + Week,
+                              data = Curr.IR.df, family = "binomial")
+
+
+
+curr.IR.5.binom.dredge <- dredge(global.curr.IR.5.binom)
+
+head(curr.IR.5.binom.dredge)
+
+################## Current IR TEN FACTOR - Logistic Regression ################################################
+
+global.curr.IR.10.binom <- glm(as.factor(Curr.IR.10) ~ Age_Start_Season + Position + OVD + weight + 
+                                 Prev.IR.wks + as.factor(Prev.IR.5) + as.factor(Prev.IR.10) + Week, data = Curr.IR.df, family = "binomial")
+
+curr.IR.10.binom.dredge <- dredge(global.curr.IR.10.binom)
+
+head(curr.IR.10.binom.dredge) ### This one is pretty weak. 
+
+################### Now run a few injury specific models ##################################################################
+
+##################### Injury specific IR Weeks analysis 
+
+names(Curr.IR.df)
+
+global.curr.IR.wks.inj <- glm(Curr.IR.wks~as.factor(Achilles) + as.factor(Knee) + as.factor(Foot) + as.factor(Spine)
+                              + as.factor(Hamstring) + as.factor(Groin) + as.factor(Shoulder) + Week, data = Curr.IR.df, family = gaussian)
+
+Curr.IR.inj.dredge <- dredge(global.curr.IR.wks.inj)
+
+head(Curr.IR.inj.dredge)
+
+################### Injury specific CURRENT IR FACTOR BASED ON PREVIOUS IR STATS AND OTHER COVARIATES - LOGISTIC REGRESSION #########################
+###############################################################################################################
+
+# Use the curr.IR.df again 
+
+
+global.curr.IR.inj.binom <- glm(Curr.IR.fact ~ as.factor(Achilles) + as.factor(Knee) + as.factor(Foot) + as.factor(Spine)
+                                + as.factor(Hamstring) + as.factor(Groin) + as.factor(Shoulder) + Week,
+                                data = Curr.IR.df, family = "binomial")
+
+
+curr.IR.inj.binom.dredge <- dredge(global.curr.IR.inj.binom)
+
+head(curr.IR.inj.binom.dredge)
+
+################## Injury specific Current IR five FACTOR - Logistic regression ##################################################
+
+global.curr.IR.inj.5.binom <- glm(Curr.IR.5 ~ as.factor(Achilles) + as.factor(Knee) + as.factor(Foot) + as.factor(Spine)
+                                  + as.factor(Hamstring) + as.factor(Groin) + as.factor(Shoulder) + Week,
+                                  data = Curr.IR.df, family = "binomial")
+
+curr.IR.inj.5.binom.dredge <- dredge(global.curr.IR.inj.5.binom)
+
+head(curr.IR.inj.5.binom.dredge)
+
+######################### Injury Specific Current IR ten Factor - Logistic Regression ###############################################
+
+
+global.curr.IR.inj.10.binom <- glm(Curr.IR.10 ~ as.factor(Achilles) + as.factor(Knee) + as.factor(Foot) + as.factor(Spine)
+                                   + as.factor(Hamstring) + as.factor(Groin) + as.factor(Shoulder) + Week,
+                                   data = Curr.IR.df, family = "binomial")
+
+curr.IR.inj.10.binom.dredge <- dredge(global.curr.IR.inj.10.binom)
+
+# Modify dredge objects 
+
+snap.dredge.1 <- as.data.frame(snap.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(snap.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.ir.dredge.1 <- as.data.frame(Curr.IR.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(Curr.IR.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value)
+
+curr.ir.inj.dredge.1 <- as.data.frame(Curr.IR.inj.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(Curr.IR.inj.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.IR.binom.dredge.1 <- as.data.frame(curr.IR.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.IR.5.binom.dredge.1 <- as.data.frame(curr.IR.5.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.5.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.IR.10.binom.dredge.1 <- as.data.frame(curr.IR.10.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.10.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.IR.inj.binom.dredge.1 <- as.data.frame(curr.IR.inj.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.inj.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+curr.IR.inj.5.binom.dredge.1 <- as.data.frame(curr.IR.inj.5.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.inj.5.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value)
+
+curr.IR.inj.10.binom.dredge.1 <- as.data.frame(curr.IR.inj.10.binom.dredge) %>% dplyr::filter(delta <4) %>% dplyr::select(-"(Intercept)", -df, -logLik, -AICc, -delta) %>% 
+  summarise_all(funs(1 - sum(is.na(.))/nrow(dplyr::filter(curr.IR.inj.10.binom.dredge, delta < 4)))) %>% tidyr::gather() %>%
+  dplyr::rename(Covariate = key, Prop.Mod = value) 
+
+save(snap.dredge.1, curr.ir.dredge.1, curr.ir.inj.dredge.1, 
+     curr.IR.binom.dredge.1, curr.IR.5.binom.dredge.1, curr.IR.10.binom.dredge.1, 
+     curr.IR.inj.binom.dredge.1, curr.IR.inj.5.binom.dredge.1, curr.IR.inj.10.binom.dredge.1, 
+     file = "RMD.Data.RData")
+
+
+
+```
+
+# Introduction
+
+Wringing your hands over whether or not to draft "injury prone" NFL players is one of the certainties of fantasy football. Thus, each offseason fantasy managers must wade through a sea of dissenting opinions regarding the future status of players who spent time on IR the previous season. Likewise, fantasy analysts admirably attempt to predict injury recurrence based on expert medical opinions, sophisticated predictive modeling, and by thoroughly examining the injury history of NFL players. Through no fault of their/our own, the fantasy football cognoscente and fantasy managers alike are often wrong when assessing the potential for player reinjury. The human body is an infinitely complex system, as is the randomness of a football season, as is the randomness of a football game, as is the stochasticity of the numerous abiotic and biotic conditions that may influence the probability of an NFL player suffering an injury over the course of an 18(!) game season. 
+
+Prediction is a powerful tool for fantasy football analysis, but it may not be the only approach to understanding reinjury in NFL players. Likewise, I personally am probably not smart enough to predict injury in NFL players. While it does not necessarily maximize predictive power, model comparison using information criterion and a suite of injury-relevant covariates may shed light on which factors are most related to NFL players missing time due to injury. 
+
+This document details my analysis of injury and game-log data from 4,402 NFL players, 8 NFL seasons, and ~14,000 total player-games.
+
+# Methods/Results
+
+For this analysis, I utilized traditional model comparison to understand the factors (I.e. age, position, injury history, etc.) most related to injury in NFL players. My goal was not to maximize prediction, instead I sought to **rigorously** model several different injury-related response variables to detect overall trends and patterns in injury in NFL players. Likewise, once identified, I thoroughly examined the effect-sizes of the most important covariates, to determine the usefulness of each for fantasy football decisions related to previously injured players. 
+
+## Raw Data
+
+GitHub user tanho63 receives full credit for scraping and compiling these data from Pro Football Reference and also for providing the .csv files that I was able to upload directly into R. 
+
+*Github user tanho63 page: https://github.com/nflverse/nflfastR-data/commits?author=tanho63*
+
+These data are in the form of Player-Week-Season specific game-logs and detail the weekly injury status of every NFL player during the 2012-2019 seasons. The data also include player age, position, whether or not a player is on injured reserve, and other information. Below is a sample of the raw data, where each row represents one player during a specific week of a specific season. The sample below shows weekly game logs from the 2018 season for A.J. Derby, who is questionable for weeks 9 1nd 10 (out in week 9 but active in week 10), and finally placed on injured reserve in week 12. 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+kable((df[314:320,1:8])) %>% kable_styling(full_width = FALSE, position = "left") %>% 
+  kable_minimal()
+
+```
+
+The raw data also include season/week specific snap counts for each player, below are the snap count data for A.J. Derby for the weeks shown above in the 2018 season. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+kable((df[314:320,c(2,4,5,11,14,16)])) %>% kable_styling(full_width = FALSE, position = "left") %>% 
+  kable_minimal()
+
+```
+
+In addition to injury status and snap count data, the raw data set also includes player information such as position, height/weight, and player age at the start of each season. The table below shows the names of all columns in the raw data set. *(Notes: OVD designates offensive vs. defensive vs. special teams players. IDs based on PFR ID, but I customized them for my own purposes.)*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+kable(as.character(names(df))) %>% kable_styling(full_width = FALSE, position = "left") 
+
+```
+
+## Final Dataset
+
+After compiling and cleaning the raw data scraped by tanho63, I prepared the data for my planned analysis in the following steps.
+
+1: Converted weekly data to season-specific data. My planned analysis was based on season-long statistics (E.g. the number of weeks spent on IR each season, total snaps by season for each player, etc.) Therefore, I used the unique player IDs to summarize relevant columns by season for each player. 
+
+2: Built covariates and response variables detailing each players season-specific IR history. These IR summary statistics were separated into two broad categories, 1) covariates detailing the previous seasons IR history for each player, and 2) response variables detailing the current seasons IR status for each player. Below I list each IR covariate/response and their definitions. 
+
+ <font size="4">**IR Covariates**</font> 
+
+**Total Number of weeks spent on IR in *previous* season:** - Pretty self-explanatory
+
+**IR/non-IR in *previous season*:** - Factor variable, simply describes whether or not each player was placed on IR in the previous season. 
+
+**IR for > five weeks in *previous* season:** - Factor, equals 1 if player spent > 5 weeks on IR in the previous season, and equals 0 if player spent 5 or fewer weeks on IR (or 0 weeks) in the previous season. 
+
+**IR for > ten weeks in *previous* season:** - Factor, equals 1 if player spent > 10 weeks on IR in the previous season, and equals 0 if player spent 10 or fewer weeks on IR (or 0 weeks) in the previous season. 
+
+<font size="4">**IR Response Variables**</font> - The IR response variables are almost identical to the IR covariates, but they represent IR statistics from the *current* season for each player. 
+
+**Total number of spent weeks on IR in *current* season:** - Again, self explanatory
+
+**IR for > five weeks in *current* season:** - 1/0 factor
+
+**IR for > ten weeks in *current* season:** - 1/0 factor
+
+The sample below shows some of the compiled IR data for a single player (ID = a10247) over three seasons. In 2016 player a10247 played 189 total snaps and spent 0 weeks on IR (column "Curr.IR.wks" = 0, thus all current season IR columns = 0). However, the previous season IR columns (columns with "Prev.IR" prefix) for player a10247 in 2016 show that he spent 16 weeks on IR in the 2015 season, thus Prev.IR.1, Prev.IR.5, and Prev.IR.10 columns all equal 1 to show that the player spent at least three (minimum IR stint), five, and ten weeks on IR in the previous season. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+kable(data.frame(Curr.IR.df.1[194:196,c(1,2,3,22:26,8:11)])) %>% kable_styling(full_width = FALSE, position = "left") %>% 
+  kable_minimal()
+
+```
+
+3: Filtered data set to only include active, NFL players who see regular playing time. First, I filtered out any players who played less than two total NFL seasons, as it would be impossible to include them in our analysis due to our time-lagged "previous IR" covariates. Second, I removed players who had never played more than 200 snaps in a single NFL season (within the temporal scope of our data set). 200 snaps is still a pretty low bar, and in the future I may rerun models using more conservative player criteria. 
+
+4: Lastly, I spent a ton of time using R to clean the injury type data, as the injury descriptions in the raw data set were not consistent, and I wanted to use those data in my analysis. For example, I had to compile things like "knee injury", "knee", "left knee", etc. into one broad category for "knee" injuries and then do the same for shoulder, hamstring, spine, head, etc. After cleaning the injury data, I created a series of covariates that described the injury type that landed a player on IR in the previous season (broad categories such as knee, foot, spine, etc.). If a player was on IR more than once (non-consecutive stints) in a previous season, then I used the injury associated with the final IR designation from the previous season to describe their previous year's injury. 
+
+The final data set that I used for my analysis consisted of summarized game log data from **4,402** NFL players and **13,975** player-seasons (E.g. player x, season 2012). The mean number of weeks spent on IR within the entire temporal scope of the data for **all** players in the data set was 4.74 weeks (median = 0 weeks), and the max was 70 total weeks. When only including players who actually spent time on IR, the mean number of weeks on IR was 13.1 (median = 13).
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+# Easy summary statistics for final data
+
+#final.stats <- Curr.IR.df.1 %>% dplyr::group_by(ID) %>% dplyr::count()
+#nrow(final.stats) # N players in data set 
+#final.stats.1 <- Curr.IR.df.1 %>% dplyr::group_by(ID, Season) %>% dplyr::count()
+#nrow(final.stats.1) # N player-Seasons in data set 
+
+# <- Curr.IR.df.1 %>% dplyr::group_by(ID) %>% dplyr::summarise(tot.IR = sum(Curr.IR.wks)) %>% 
+ #                                 dplyr::ungroup() %>% dplyr::summarise(mean.IR = mean(tot.IR), 
+  #                                                                      min.IR = min(tot.IR), 
+   #                                                                     max.IR = max(tot.IR))
+
+#player.sums
+
+#IR.player.sums <- Curr.IR.df.1 %>% dplyr::group_by(ID) %>% dplyr::summarise(tot.IR = sum(Curr.IR.wks)) %>% 
+ #                                       dplyr::filter(tot.IR > 0) %>%
+  #                                 dplyr::ungroup() %>% dplyr::summarise(mean.IR = mean(tot.IR), 
+   #                                                                      median.IR = median(tot.IR),
+    #                                                                    min.IR = min(tot.IR), 
+     #                                                                max.IR = max(tot.IR)) # isolate players who spent time on IR
+
+#IR.player.sums
+
+```
+
+The final data set included the number of total snaps by player and season, the previously listed IR summary columns describing time spent on IR in current and previous seasons for each player, as well as player age to start the season, player weight, position, and injury type from the last IR stint in the previous season. 
+
+## Bayesian and Frequentist GLMs
+
+Yes, I know, you can't mix mix frequentist and Bayesian modeling in the same analysis. BUT, my goals for this analysis were to 1) have fun, 2) build some injury models that I always been curious about, and 3) create a work sample that shows as many of my skills as possible. Also, after ~8 years, I just finally escaped academia and the peer-review process, and I need to live a little. I'm confident that I can break a few rules and still be thoughtful/careful about my inference. 
+
+As stated above, I wanted to rigorously model these data, with the goal of answering one, broad question. 
+
+<font size="3">*If a player spends time on IR in season 1, what is the likelihood that they spend time on IR in Season 2?*</font>
+
+There are, of course, almost unlimited sub-questions such as... 
+
+<font size="3">*Does the amount of time a player spends on IR in season 1 influence the likelihood that they will end up on IR in season 2?*</font>
+
+And
+
+<font size="3">*How does the likelihood of landing on IR in season 2 vary with age, position, and other factors?*</font>
+
+Etc., etc.
+
+Generally speaking, to answer these questions, I used hierarchical logistic and linear regression models, all of which followed the same general model format. 
+
+<font size="3">*IR status in current season~Intercept + IR status in previous season + other player-specific factors + error*</font>
+
+More specifically, the following steps detail my modeling process. 
+
+### Frequentist GLMs
+
+First, I fit nine global models in a frequentist setting, six logistic regression models and three linear regression models (listed below). In the models listed below, $\beta0$ represents the intercept term and the subsequent betas ($\beta i$) represent the fixed-effects of various covariates. Likewise, the response variables are represented as [$\frac{P(Binomial Response Variable)}{1-P(Binomial Response Variable)} =$] for the binomial logistic regression models (1-6), and $Response Variable_i =$ (I.e. $y_i =$ in a linear regression equation) for the linear regression models (7-9). The models and covariates are listed below. 
+
+*All frequentist models were fit in R using a binomial and Gaussian distribution for logistic and linear models respectively. Also, regression models traditionally have* $\epsilon$ *at the end to represent error. I did not include that term for ease of viewing, but models included measures of statistical uncertainty.*
+
+<br>
+
+**Logit Model 1** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor +\\ \beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+Response: Binomial response designating whether or not a player was on IR for any number of weeks in a given season. 
+
+Question: How does a players IR history from the previous season influence the probability of landing on IR during the subsequent season?
+
+<br>
+
+**Logit Model 2** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor +\\ \beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+Response: Binomial response designating whether or not a player was on IR **for > 5 weeks** in a given season. 
+
+Question: How does a players IR history from the previous season influence the probability of landing on IR **for > 5 weeks* during the subsequent season?
+
+<br>
+
+**Logit Model 3** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor +\\ \beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+Response: Binomial response designating whether or not a player was on IR  **for > 10 weeks** in a given season. 
+
+Question: How does a players IR history from the previous season influence the probability of landing on IR **for > 10 weeks* during the subsequent season?
+
+<br>
+
+**Logit Model 4** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*Shoulder + \\\beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+Response: Binomial response designating whether or not a player was on IR for any number of weeks in a given season. 
+
+Question: How do various injuries (that landed a player on IR) from the previous season influence the probability of a player landing on IR for any number of weeks in the subsequent season? 
+
+<br>
+
+**Logit Model 5** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*Shoulder + \\\beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+Response: Binomial response designating whether or not a player was on IR **for > 5 weeks** in a given season. 
+
+Question: How do various injuries from the previous season influence the probability of a player landing on IR for **for > 5 weeks** in the subsequent season? 
+
+<br>
+
+**Logit Model 6** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 10 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \\ \beta4*Shoulder +\beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+Response: Binomial response designating whether or not a player was on IR  **for > 10 weeks** in a given season. 
+
+Question: How do various injuries from the previous season influence the probability of a player landing on IR for **for > 10 weeks** in the subsequent season? 
+
+<br>
+
+**Linear Regression Model 1** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+Response: Continuous response showing the number of weeks a player spent on IR in a given season. 
+
+Question: How does a player IR history from the previous season influence the number of weeks spent on IR in the subsequent season?
+
+<br>
+
+**Linear Regression Model 2** 
+
+$SnapsCurrent Season_i = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+Response: Continuous response showing the number of snaps played for each player in a given season. 
+
+Question: How does a players IR history from the previous season influence the number of snaps played in the subsequent season?
+
+<br>
+
+**Linear Regression Model 3** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*Shoulder\ + \\\beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+Response: Continuous response showing the number of weeks a player spent on IR in a given season. 
+
+Question: How do various injury types from the previous season influence the number of weeks spent on IR In the subsequent season?
+
+<br>
+
+**Covariate Legend**
+
+Previous IR Factor - Binomial factor designating whether or not a player was on IR for any number of weeks in the previous season. 
+
+Previous IR 5 Factor - Binomial factor designating whether or not a player was on IR for > 5 weeks in previous season. 
+
+Previous IR 10 Factor - Binomial factor designating whether or not a player was on IR for > 10 weeks in previous season.
+
+Previous IR Weeks - Continuous variable showing the total number of weeks spent on IR in previous season. 
+
+Last IR Week - Last week that a player was listed on IR in the previous season.
+
+Position - Player position. 
+
+Weight - Player weight to start the season.
+
+Age - Player Age to start the season.
+
+OVD - designates offensive vs. defensive vs. special teams players
+
+Spine - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a spine injury. 
+
+Hamstring - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a hamstring injury. 
+
+Knee - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a knee injury. 
+
+Achilles - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with an Achilles injury. 
+
+Shoulder - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a shoulder injury. 
+
+Foot - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a foot injury.
+
+Groin - Binomial factor designating whether or not the previous seasons last (I.e. latest in the season, final) IR stint was associated with a groin injury.
+
+<font size="3">**Frequentist Model and Covariate Comparison using AICc**</font>
+
+Like I said before, I wanted to rigorously model these IR response variables and covariates. So, after fitting the nine GLMs, I then compared all possible combinations of the covariates included in each global model using AICc (Corrected Akaike's Information Criterion). I chose to dredge the global models based on the findings of Morin et al. (2012). Morin et al. (2012) showed that, unless you are testing specific hypotheses carefully laid out in *ad-hoc* models, simply comparing all possible combinations of covariates included in a global model is more likely to yield the best-fitting model than having multiple covariate suites, using step wise selection, or other more complex model comparison routines. Also, I tend to focus on columns (rather than rows) in a model selection table, meaning my focus is on 1) which covariates routinely appear in **all** of the best-supported models, 2) how the strength and direction of covariates change/don't change based on model structure, 3) which covariates appear to be uninformative (Arnold, 2004), 4) how model weights and likelihoods are distributed throughout the model table. By focusing on a model table in it's entirety, I avoid simply taking the best-supported model (delta AICc = 0.00) and potentially missing out equally well-supported variables and models. 
+
+*Arnold, T. W. 2010. Uninformative parameters and model selection using Akaike’s Information Criterion. The Journal of Wildlife Management 74:1175–1178.*
+
+*Morin, D. J., C. B. Yackulic, J. E. Diffendorfer, D. B. Lesmeister, C. K. Nielsen, J. Reid, and E. M. Schauber. 2020. Is your ad hoc model selection strategy affecting your multimodel inference? Ecosphere 11:e02997.*
+
+Comparing all possible combinations of each of the nine global model yielded 256 sub-models per global model (so 9 sets of 256 models). After arranging sub-models by AICc, I removed all models where delta AICc > 4.00, and estimated the ratio of models where delta AICc < 4.00 that included each covariate from the global model. Basically, I looked at which covariates most frequently appeared in the best-supported models. 
+
+For example, the following table shows the proportion of Logit Model 1 sub-models with delta AICc < 4.00 that included each covariate included in the global model. As you can see, player age to start the season was included in all delta < 4.00 models, as was position, last week on IR in the previous season, and player weight. Alternatively, Prev.IR.wks (number of IR weeks in the previous season) was included in only 38 percent of models where delta < 4.00. These tables are not the final say, as model weights, coefficient consistency, and likelihoods must also be considered, but they are a good way of seeing which covariates are consistently included in well-supported models for each response variable. In the case of Logit Model 1, the probability of landing on IR in a given season seems to be most related to age, position, weight, and the last week on IR in the previous season. 
+
+<br>
+
+**Logit Model 1** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \beta3*Previous IR.10factor + \\\beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.IR.binom.dredge.2 <- curr.IR.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Age","Prev.IR.10", "Prev.IR.5","OVD","Position", "Prev.IR.wks",     "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+Below are the covariate proportion tables for each of the other 8 global models. 
+
+<br>
+
+**Logit Model 2** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+<br>
+
+```{r, echo = FALSE,  message = FALSE, warning = FALSE}
+
+curr.IR.5.binom.dredge.2 <- curr.IR.5.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Age","Prev.IR.10", "Prev.IR.5","OVD","Position", "Prev.IR.wks",     "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.5.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Logit Model 3** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.IR.10.binom.dredge.2 <- curr.IR.10.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Age","Prev.IR.10", "Prev.IR.5","OVD","Position", "Prev.IR.wks",     "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.5.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Logit Model 4** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*Shoulder + \\\beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.IR.inj.binom.dredge.2 <- curr.IR.inj.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Achilles", "Foot", "Groin", "Hamstring", "Knee", "Shoulder", "Spine", "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.inj.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Logit Model 5** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee +\beta3*Hamstring + \\\beta4*Shoulder + \beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.IR.inj.5.binom.dredge.2 <- curr.IR.inj.5.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Achilles", "Foot", "Groin", "Hamstring", "Knee", "Shoulder", "Spine", "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.inj.5.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Logit Model 6** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 10 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \\\beta4*Shoulder + \beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+
+curr.IR.inj.10.binom.dredge.2 <- curr.IR.inj.10.binom.dredge.1 %>% dplyr::mutate(Covariate = c("Achilles", "Foot", "Groin", "Hamstring", "Knee", "Shoulder", "Spine", "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.IR.inj.10.binom.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Linear Regression Model 1** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.ir.dredge.2 <- curr.ir.dredge.1 %>% dplyr::mutate(Covariate = c("Age","Prev.IR.10", "Prev.IR.5","OVD","Position", "Prev.IR.wks",     "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.ir.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Linear Regression Model 2** 
+
+$SnapsCurrent Season_i = \beta0 + \beta1*PreviousIRfactor + \beta2*PreviousIR.5factor + \\\beta3*Previous IR.10factor + \beta4*PreviousIRweeks + \beta5*LastIRweek + \beta6*Position + \beta7*Weight + \beta8*Age + \beta8*OVD$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+snap.dredge.2 <- snap.dredge.1 %>% dplyr::mutate(Covariate = c("Age","Prev.IR.10", "Prev.IR.5","OVD","Position", "Prev.IR.wks",     "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(snap.dredge.2, digits = 2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+
+```
+<br>
+
+**Linear Regression Model 3** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \\\beta4*Shoulder + \beta5*Foot + \beta6*Groin + \beta7*Achilles + \beta8*LastIRweek + \beta9*Weight$
+
+<br>
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr.ir.inj.dredge.2 <- curr.ir.inj.dredge.1 %>% dplyr::mutate(Covariate = c("Achilles", "Foot", "Groin", "Hamstring", "Knee", "Shoulder", "Spine", "Last.IR.Wk", "Weight")) %>% 
+                        dplyr::rename(Proportion = Prop.Mod) %>% dplyr::arrange(desc(Proportion), Covariate)
+
+kable(curr.ir.inj.dredge.2) %>% kable_styling(full_width = FALSE, position = "left") %>%
+    column_spec(column = c(1,2), width = c("4cm", "4cm"))
+ 
+```
+
+There are some pretty clear patterns in the proportion-based model tables. First, player age, weight, position, and the "last week on IR during the previous season" covariates are included in most models where delta < 4.00. Also, aside from the "last week on IR" covariate, most of the previous season IR covariates aren't included in the best-supported models. 
+In the case of the injury-specific model tables, the knee, spine, and hamstring covariates are most well-supported, whereas the Achilles, foot, groin, and shoulder binomial covariates are not included in many top models. 
+
+Here are all the proportion-based model tables bound together. First, the non-injury-specific models. Again, age, position, weight, and the last week on IR from the previous season are the most common predictors of both the binomial and continuous IR response variables.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+main.prop <- cbind.data.frame(curr.IR.binom.dredge.2, curr.IR.5.binom.dredge.2, curr.IR.10.binom.dredge.2, curr.ir.dredge.2, snap.dredge.2)
+
+main.prop %>% kable("html", digits = 2) %>% add_header_above(c("Logit Models" = 6, "Linear Regression Models" = 4)) %>% 
+                          column_spec(1:6, color = "steelblue") %>% 
+                        column_spec(7:10, color = "tomato") %>% kable_styling()
+
+
+#%>% kable("html", digits = 2) %>% add_header_above(c("Original data set" = 3, "Populated from 30 days" = 2))%>%
+ # column_spec(2:3, color = "green") %>%
+  #column_spec(4:5, color = "blue")%>% kable_styling()
+
+```
+
+Now the injury-specific models. Here, the knee injury, spine injury, and hamstring injury covariates are the most commonly found injury-specific covariates when delta < 4.00. I also included player weight and last week on IR in the previous season covariates in these injury models, because both covariates had the potential to confound injury-specific effect sizes. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+inj.prop <- cbind.data.frame(curr.IR.inj.binom.dredge.2, curr.IR.inj.5.binom.dredge.2, curr.IR.inj.10.binom.dredge.2, curr.ir.inj.dredge.2)
+
+inj.prop %>% kable("html", digits = 2) %>% add_header_above(c("Logit Models" = 6, "Linear Regression Models" = 2)) %>% 
+                          column_spec(1:6, color = "steelblue") %>% 
+                        column_spec(7:8, color = "tomato") %>% kable_styling()
+
+```
+
+<font size="3">**Best-Supported Frequentist Models**</font>
+
+After considering AICc scores and the model proportion tables, I looked at the model weights and log likelihoods. Without getting too detailed here, there was considerable model selection uncertainty. Again, I was trying to avoid simply taking the top model in each table (delta AICc = 0.00), and the uniformity in model weights reinforced this decision. Therefore, I chose to include all covariates that were included in 50 percent of sub-models where delta AICc < 4.00. This likely included some uninformative covariates, but I decided to leave those in for the Bayesian modeling and make inference about effect sizes during that step.
+
+The following list shows the best-supported model structures from the frequentist modeling. Note that most of the model structures are the same (within the two, broad injury and non-injury-specific categories). 
+
+<br>
+
+**Logit Model 1** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*LastIRweek + \beta2*Position + \beta3*Weight + \beta4*Age$
+
+<br>
+
+**Logit Model 2** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*PreviousIR.5factor + \beta2*LastIRweek + \beta3*Position + \beta4*Weight + \beta5*Age$
+
+<br>
+
+**Logit Model 3** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*LastIRweek + \beta2*Position + \beta3*Weight$
+
+<br>
+
+**Logit Model 4** 
+
+$\frac{P(Current Season IR binom)}{1-P(Current Season IR binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*LastIRweek + \beta5*Weight$
+
+<br>
+
+**Logit Model 5** 
+
+$\frac{P(Current Season IR > 5 weeks Binom)}{1-P(Current Season IR > 5 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*LastIRweek + \beta5*Weight$
+
+<br>
+
+**Logit Model 6** 
+
+$\frac{P(Current Season IR > 10 weeks Binom)}{1-P(Current Season IR > 10 weeks Binom)} = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*Achilles + \beta5*LastIRweek + \beta6*Weight$
+
+<br>
+
+**Linear Regression Model 1** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*LastIRweek + \beta2*Position + \beta3*Weight + \beta4*Age$
+
+<br>
+
+**Linear Regression Model 2** 
+
+$SnapsCurrent Season_i = \beta0 + \beta1*LastIRweek + \beta2*Position + \beta3*Weight + \beta4*Age + \beta5*PreviousIRweeks$
+
+<br>
+
+**Linear Regression Model 3** 
+
+$WeeksIRCurrent Season_i = \beta0 + \beta1*Spine + \beta2*Knee + \beta3*Hamstring + \beta4*LastIRweek + \beta5*Weight$
+
+
+### Bayesian GLMs
+
+Finally, I fit all of the above models in a Bayesian setting using JAGS (Just Another Gibbs Sampler) and the R2jags package in R. I set each model to run for 50,000 iterations, with a 2,000 iteration burn-in, and 3 chains. I used very uninformative priors for all models. In addition to fitting the model, I used the regression equations and iterations of the mcmc chains to estimate derived parameters predicting effect sizes across the range of covariate values found in the data set. *I also added a random intercept based on player ID to each model*, both to understand the role of heterogeneity and to partially account for confounding due to differences between individuals. 
+
+The code below shows the model structure of one of the logistic models in JAGS, note the derived parameters where I predict effect sizes for each covariate while holding other covariates to their mean values. 
+
+```{r, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE, eval=FALSE}
+
+IR.binom.jags <- function() {
+  for( i in 1 : N ) {
+    Curr.IR.fact[i] ~ dbern(p[i])
+    logit(p[i]) <- b0 + a[ID[i]] + # Slope term and random effects of player ID
+                                   beta1*Age_Start_Season[i] + # Fixed effects of age, last week on IR, weight, and player position. 
+                                   beta2*Week[i] + beta3*weight[i] + beta[Position[i]]
+  }     
+  
+  b0 ~ dnorm( 0 , 1.0E-12 ) # Set up uninformative priors for fixed beta and intercept. 
+  beta1 ~ dnorm( 0 , 1.0E-12 )
+  beta2 ~ dnorm( 0 , 1.0E-12 )
+  beta3 ~ dnorm( 0 , 1.0E-12 )
+  
+  beta[1] <- 0 # Set up reference category for position 
+  for (i in 2:8){
+    beta[i] ~ dnorm(0, 0.01) # Set up coefficients for each subsequent position category 
+  }
+
+  sigma_a ~ dunif(0, 100) # standard deviation of random effect (variance between sites)
+  tau_a <- 1 / (sigma_a * sigma_a) # convert to precision
+  for (j in 1:NID){
+    a[j] ~ dnorm(0, tau_a) # random intercept for each site
+  }
+  sigma ~ dunif(0, 100) # standard deviation of fixed effect (variance within sites)
+  tau <- 1 / (sigma * sigma) # convert to precision
+  
+  # Derived parameters
+  
+  for (i in 1:length(age.predict)){ # Use regression equation to predict prob. of response across range of ages in data. Hold last week on IR and age at their mean (8 and 26 respectively.)
+    
+    logit(predict.age[i]) <- b0 + beta1 * age.predict[i] + beta2 * 8 + beta3 * 240
+  }
+  
+  for (i in 1:length(weight.predict)){ # Weight prediction 
+    
+    logit(predict.weight[i]) <- b0 + beta3 * weight.predict[i] + beta1 * 26 + beta2 * 8
+  }
+  
+  for (i in 1:length(week.predict)){ # Week prediction 
+    
+    logit(predict.week[i]) <- b0 + beta2 * week.predict[i] + beta1 * 26 + beta3 * 240
+  }
+  
+  for (i in 2:8){ # Prediction for each position 
+    logit(pos.1[i]) <- b0 + beta[i] * 1 + beta1 * 26 + beta2 * 8 + beta3 * 240
+  }
+  
+  logit(pos.0) <- b0 + beta1 * 26 + beta2 * 8 + beta3 * 240 # Prediction for reference position 
+  
+}
+
+```
+
+The code below shows the model structure for a linear regression model in JAGS. 
+
+```{r, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE, eval=FALSE}
+
+weeks.inj.jags <- function(){
+  # Likelihood:
+  for (i in 1:N){
+    Curr.IR.wks[i] ~ dnorm(mu[i], tau) # tau is precision (1 / variance)
+    mu[i] <- alpha + a[ID[i]] + # Random effect of ID
+                beta1 * Week[i] + beta2 * weight[i] + # Betas for week and weight. 
+      beta3 * Knee[i] + beta4 * Spine[i] + beta5 * Hamstring[i]# Add betas for knee, spine, and hammy
+  }
+  # Priors:
+  alpha ~ dnorm(0, 0.01) # intercept
+  sigma_a ~ dunif(0, 100) # standard deviation of random effect (variance between sites)
+  beta1 ~ dnorm(0, 0.01) # Covariate priors, everything is very uninformative
+  beta2 ~ dnorm(0, 0.01)
+  beta3 ~ dnorm(0, 0.01)
+  beta4 ~ dnorm(0, 0.01)
+  beta5 ~ dnorm(0, 0.01)
+  
+  tau_a <- 1 / (sigma_a * sigma_a) # convert to precision
+  for (j in 1:NID){
+    a[j] ~ dnorm(0, tau_a) # random intercept for each player
+  }
+  
+  sigma ~ dunif(0, 100) # standard deviation of fixed effect (variance within players)
+  tau <- 1 / (sigma * sigma) # convert to precision
+  
+  predict.knee[1] <- alpha + beta1 * 8 + beta2 + 240 # Very simple derived parameters for this one, but still worth within jags because it gives us 
+  predict.knee[2] <- alpha + beta3 * 1 + beta1 * 8 + beta2 + 240 # free uncertainty without having to use delta method or bootstrap
+  
+  predict.spine[1] <- alpha + beta1 * 8 + beta2 + 240 # Prediction for player without spine injury
+  predict.spine[2] <- alpha + beta4 * 1 + beta1 * 8 + beta2 + 240 #prediction for player WITH spine injury
+  
+  predict.hamstring[1] <- alpha + beta1 * 8 + beta2 + 240 # Without hamstring injury
+  predict.hamstring[2] <- alpha + beta5 * 1 + beta1 * 8 + beta2 + 240 # WITH hamstring injury
+  
+}
+
+```
+
+<font size="3">**Bayesian Models and Effect Sizes**</font>
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE, eval=TRUE}
+
+# Make character vector of all fitted Jags model RData files
+
+temp = list.files(pattern="fit")
+
+# Load them all 
+
+myfiles = lapply(temp,load,.GlobalEnv)
+
+# Put all JAGS objects into a list
+
+fit.list <- list(mget(ls(pattern = "fit")))
+
+# Extract specific part of each JAGS object into a 2nd list. We are extracting the parts most
+# useful to us, which are the estimates and uncertainty for all parameters we built into the models. 
+
+sum.list <- lapply(fit.list[[1]], function(l)
+                        data.frame(l$BUGSoutput$summary))
+
+# We need row names, so for each dataframe (each one represents parameter estimates from a unique model)
+# we will add a column called "Par" to store rownames (row names are actually the parameter names)
+
+for (i in 1:9) {
+  sum.list[[i]]$Par <- row.names(sum.list[[i]])
+}
+
+# Add a column to each list element (again, unique dfs containing the parameter estimates for each model)
+# we need to add a final identifying column so that we can rbind them all into one big dataframe and not 
+# lose track of which model they came from. 
+
+# Each list element is still associated with the original and JAGS model-specific label 
+# from when we loaded them into R. So, we will take those names ([i]-level), and add them 
+# as a column to each unique dataframe within our list [[i]] level. 
+
+for (i in 1:9) {
+  sum.list[[i]]$Model <- names(sum.list[i])
+}
+
+# Now each list element is a dataframe that includes parameters and uncertainty for a given model, 
+# as well as a column to keep track of which model they came from. 
+
+# Clean up and remove a few columns that we don't care about and don't match between dfs. 
+
+for (i in 1:9) {
+  sum.list[[i]]$Rhat <- NA
+}
+
+for (i in 1:9) {
+  sum.list[[i]]$n.eff <- NA
+}
+
+sum.list.1 <- map(sum.list, ~ (.x %>% select(-Rhat, -n.eff)))
+
+# All we have to do now is stack them into one big dataframe and start plotting effect-sizes. 
+
+fitted.params <- do.call(rbind, sum.list)
+
+# There are a bunch of easy identifiers in the model names to help filter and sort all of these. 
+# Logistic models include "binom" in the name, and injury-specific models include "inj". 
+# Likewise, model names with IR.5 or IR.10 differentiate between the IR/non-IR factor and the 
+# greater than 5 weeks on IR and > 10 weeks on IR factors respectively. 
+
+```
+
+As mentioned above, I used derived parameters embedded in the JAGS code to predict effect sizes of all covariates carried through to the Bayesian round. Basically, I manually coded the regression equations to estimate each response variable across the entire range of values found in our data for each covariate. The advantage of doing this directly in JAGS is that you get free measures of uncertainty (credible intervals), estimated using the distribution of the 50,000 mcmc chains. This is a lot easier than the delta method or other ways of doing prediction that don't come in the form of an R function. 
+
+Below, I step through each covariate **included in the Bayesian round (I.e. the best-supported covariates)** and plot effect sizes against the various response variables.
+
+<font size="3">**Final Week on IR in Previous Season Covariate**</font>
+
+To review, the "last week on IR" covariate was continuous, and represented the last week from the previous season where each player was listed on injured reserve. I was curious to see if players who went on IR late in the season were more susceptible to injury in the subsequent season than players who went on IR early in the season. Perhaps players who go on IR at the end of the season have less time to heal? Or perhaps they player through injury for much of the season, only to finally be forced onto IR as their injuries worsen. 
+
+Regardless, unlike most of the other previous-season-IR covariates, the "last week on IR" (LWOIR) covariate was very well-supported during model selection. Based on model comparison, LWOIR made it through to the round of Bayesian models for all nine global models. For the sake of brevity, we will look at predicted effect sizes from four of those nine models. 
+
+The figure below shows (top panel) the *predicted* relationship between LWOIR in the previous season and the probability of landing on IR for >0, >5, and >10 weeks (separate models represented by different colors) in the subsequent season, as predicted by the logit models. The bottom panel shows the expected relationship between LWOIR in the previous season and the predicted number of weeks on IR in the subsequent season, as predicted by a linear regression model. 
+
+There do seem to be positive relationships between LWOIR and each of the response variables, meaning the probability of landing on IR in the subsequent season and also the expected number of weeks on IR in the subsequent season *increase* as LWOIR increases. However, 1) the relationships indicate *modest* effect sizes, and 2) uncertainty and wide credible intervals make confident inference about these positive relationships difficult. 
+
+*All other covariates held at their mean, statistical uncertainty represented by Bayes 95% credible intervals.*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+pred.week <- fitted.params %>% dplyr::filter(grepl("predict.week", Par)) %>% 
+                dplyr::mutate(Week = rep(rep(0:21),4))
+
+# plot the binomial response models in the same panel 
+
+pred.wk.binom.plot <- pred.week %>% dplyr::filter(!grepl("wks", Model)) %>%
+            ggplot(aes(x = Week, y = mean)) + geom_point(aes(color = Model)) +                                           geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Model), width = .1, alpha = 0.5) +
+  scale_color_manual(labels = c("IR > 10 Wks", "IR > 5 Wks", "IR > 0 Wks"), 
+                     values = c("forestgreen", "goldenrod2", "mediumpurple3")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10),
+        legend.position = c(.25,.8))  + 
+            scale_y_continuous(breaks = seq(0,.3,.1), limits                                                                                                    = c(0,.3)) + 
+         labs(x = "Final Week on IR-Previous Season", y = "Prob. of IR") + 
+         scale_x_continuous(limits = c(0,21), 
+                            breaks = c(seq(0,21,3)))
+
+pred.wk.plot  <- pred.week %>% dplyr::filter(grepl("wks", Model)) %>%
+            ggplot(aes(x = Week, y = mean)) + geom_point(color = "tomato2") +                                           geom_errorbar(aes(ymin = X2.5., ymax = X97.5.), color = "tomato1", width = .1, alpha = 0.5) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10))  + 
+            scale_y_continuous(breaks = seq(0,3,.5), limits                                                                                                    = c(0,3)) + 
+         labs(x = "Final Week on IR-Previous Season", y = "Pred. Weeks on IR") + 
+         scale_x_continuous(limits = c(0,21), 
+                            breaks = c(seq(0,21,3)))
+
+
+grid.arrange(pred.wk.binom.plot, pred.wk.plot, ncol = 2)
+
+```
+
+<font size="3">**Injury-Specific Covariates (Knee, Spine, Hamstring, Achilles)**</font>
+
+During model comparisons of the injury-specific models, the knee, spine, hamstring, and Achilles covariates rose to the top. Again, these injuries represent the last IR-resulting injury from the previous season for each player, and I modeled the influence of previous seasons injuries on the various response variables. 
+
+While model selection suggested that the previous seasons injury covariates were important for describing variation in subsequent season response variables, the beta coefficients and predicted effect sizes indicated that they injury-specific covariates were not very influential. 
+
+The figure below shows the influence of previous seasons injuries (x-axes) on (Panel A) the *predicted* probability of landing on IR in a given season for any number of weeks, (B) the probability of landing on IR for > 5 weeks in a given season, (c) the probability of landing on IR for > 10 weeks, and (D) the predicted number of weeks on IR. Each panel represents prediction from one of four Bayes models, but the influence of previous seasons injuries on each response variable is mostly inseparable from non-injury players. Panel C does show increases in the point estimates for the predicted number of weeks on IR in previously injured players compared to players with no injuries in the previous season, but strong inference is hampered by high uncertainty and wide credible intervals.
+
+*All other covariates held at their mean, statistical uncertainty represented by Bayes 95% credible intervals.*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+# Filter fitted params to keep injury-specific prediction, relabel reference level params (IE predictions where injury = 0) to make it easier to filter and plot. 
+
+inj.keep <- c("knee", "spine", "hamstring", "achilles")
+
+inj.predict <- fitted.params %>% dplyr::filter(grepl(paste(inj.keep,collapse="|"), Par)) %>% 
+                                  dplyr::mutate(Par.1 = Par, 
+                                                Par.1 = gsub("predict.", "", Par.1), 
+                                                Par.1 = ifelse(grepl("[1]", Par.1), "No Injury", Par.1), 
+                                                Par.1 = gsub("\\[2]", "", Par.1), 
+                                                Par.1 = str_to_title(Par.1))
+                                    
+# FIlter data to separately plot params from each model. Definitely more efficient ways to do this, but I 
+# like having nice clean and separate dfs to work with. 
+
+inj.5.pred.binom <- inj.predict %>% dplyr::filter(grepl("IR.5", Model)) %>% 
+                                                          distinct(Par.1, mean, .keep_all = TRUE)
+
+inj.10.pred.binom <- inj.predict %>% dplyr::filter(grepl("IR.10", Model)) %>% 
+                                                          distinct(Par.1, mean, .keep_all = TRUE)
+
+inj.pred.binom <- inj.predict %>% dplyr::filter(grepl("IR.inj.bin", Model)) %>% 
+                                                          distinct(Par.1, mean, .keep_all = TRUE)
+
+inj.wks.pred <- inj.predict %>% dplyr::filter(grepl("weeks", Model)) %>% 
+  
+                                                          distinct(Par.1, mean, .keep_all = TRUE)
+
+inj.pred.binom.plot <- inj.pred.binom %>%
+  arrange(mean) %>%  # Change order of Par.1 factor levels
+  mutate(Par.1 =factor(Par.1, levels = Par.1)) %>%
+     ggplot(aes(x = Par.1, y = mean)) + geom_point(aes(color = Par.1)) + 
+                              geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Par.1), width = .1) + 
+                        scale_color_manual(breaks = c("No Injury", "Hamstring", "Knee", "Spine"), 
+                                           values = c("forestgreen", "mediumpurple4", "goldenrod3",                                                                                                 "steelblue3")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10), 
+        legend.position = "false", 
+        axis.title.x = element_blank())  + scale_y_continuous(breaks = seq(0,.5,.1), limits                                                                                                    = c(0,.5)) + 
+            labs(y = "Prob. of IR (>0 weeks)") +
+  ggplot2::annotate("text",label = "A", x = .6, y = .5)
+
+inj.5.pred.binom.plot <-inj.5.pred.binom %>%
+  arrange(mean) %>%  # Change order of Par.1 factor levels
+  mutate(Par.1 =factor(Par.1, levels = Par.1)) %>%
+     ggplot(aes(x = Par.1, y = mean)) + geom_point(aes(color = Par.1)) + 
+                              geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Par.1), width = .1) + 
+                        scale_color_manual(breaks = c("No Injury", "Hamstring", "Knee", "Spine"), 
+                                           values = c("forestgreen", "mediumpurple4", "goldenrod3",                                                                                                 "steelblue3")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10), 
+        legend.position = "false", 
+        axis.title.x = element_blank())  + scale_y_continuous(breaks = seq(0,.5,.1), limits                                                                                                    = c(0,.5)) + 
+            labs(y = "Prob. of IR (>5 weeks)") +
+  ggplot2::annotate("text",label = "B", x = .6, y = .5)
+
+inj.10.pred.binom.plot <-inj.10.pred.binom %>%
+  arrange(mean) %>%  # Change order of Par.1 factor levels
+  mutate(Par.1 =factor(Par.1, levels = Par.1)) %>%
+     ggplot(aes(x = Par.1, y = mean)) + geom_point(aes(color = Par.1)) + 
+                              geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Par.1), width = .1) + 
+                        scale_color_manual(breaks = c("No Injury", "Hamstring", "Knee", "Spine"), 
+                                           values = c("forestgreen", "mediumpurple4", "goldenrod3",                                                                                                 "steelblue3")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10), 
+        legend.position = "false", 
+        axis.title.x = element_blank())  + scale_y_continuous(breaks = seq(0,.5,.1), limits                                                                                                    = c(0,.5)) + 
+            labs(y = "Prob. of IR (>10 weeks)") +
+  ggplot2::annotate("text",label = "C", x = .6, y = .5)
+
+inj.wks.pred.plot <- inj.wks.pred %>%
+  arrange(mean) %>%  # Change order of Par.1 factor levels
+  mutate(Par.1 =factor(Par.1, levels = Par.1), mean = mean - 238,
+                                        X2.5. = X2.5. - 238, 
+                                        X97.5. = X97.5. - 238, 
+                          X2.5. = ifelse(X2.5. < 0, 0, X2.5.)) %>% # I made a small mistake in the JAGS 
+                                                                     # for this model and have to re-scale
+                                                                          # everything back to zero. Does not                                                                       # influence effect size compared to 
+     ggplot(aes(x = Par.1, y = mean)) + geom_point(aes(color = Par.1)) +                                                                 # reference (no injury).
+                              geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Par.1), width = .1) + 
+                        scale_color_manual(breaks = c("No Injury", "Hamstring", "Knee", "Spine"), 
+                                           values = c("forestgreen", "mediumpurple4", "goldenrod3",                                                                                                 "steelblue3")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10), 
+        axis.title.x = element_blank(),
+        legend.position = "false")  + 
+            scale_y_continuous(breaks = seq(0,3.5,.5),    limits = c(0.,3.5))+
+        labs(y = "Predicted Weeks on IR") +
+  ggplot2::annotate("text",label = "D", x = .6, y = 3.5)
+
+grid.arrange(inj.pred.binom.plot, inj.5.pred.binom.plot, inj.10.pred.binom.plot, inj.wks.pred.plot)
+
+```
+
+<font size="3">**Player Age**</font>
+
+Player age was one of the best-supported covariates. In initial model building, player age was included in five global models (and not the four injury-specific models). After model selection and comparison of all possible combinations of each global model, I retained player age for use in 4/5 Bayesian models.
+
+So, model selection would suggest that player age was well-supported in explaining 1) the probability of a player landing on IR at all in a given season, 2) the probability of a player landing on IR for > 5 weeks in a given season, 3) the total number of weeks spent on IR in a given season, and 4) the total number of snaps played in a given season. However, when using AICc it is important to examine effect sizes and measures of uncertainty, in addition to model selection results, before making inferences about specific covariates. 
+
+The figure below shows the **predicted** relationship between player age to start each season and the probability of landing on IR for any number of weeks (left panel, binomial model), and the relationship between player age and the probability of landing on IR for greater than five weeks (right panel, binomial model). 
+
+*All other covariates held at their mean, statistical uncertainty represented by Bayes 95% credible intervals.*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, eval=TRUE}
+
+age.predict <- fitted.params %>% dplyr::filter(grepl("age", Par)) 
+
+age.predict.IR.bin <- age.predict %>% dplyr::filter(Model == "fit_IR.binom") %>% dplyr::mutate(Age = 21:42)
+age.predict.IR.5.bin <- age.predict %>% dplyr::filter(Model == "fit_IR.5.binom")  %>% dplyr::mutate(Age = 21:42)
+age.predict.snaps <- age.predict %>% dplyr::filter(Model == "fit_snaps")  %>% dplyr::mutate(Age = 21:42)
+age.predict.ir.wks <- age.predict %>% dplyr::filter(Model == "fit_curr.ir.wks")  %>% dplyr::mutate(Age = 21:42)
+
+age.ir.bin.plot <- ggplot(age.predict.IR.bin, aes(x = Age, y = mean)) + geom_point( color = "aquamarine4") + 
+                                                     geom_errorbar(aes(ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                                                                        width = .1, color = "aquamarine4") +
+                                                     labs(x = "Player Age", y = "Prob. of IR (> 0 weeks)") + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10)) + 
+  scale_x_continuous(breaks = seq(20,45,5), limits = c(20,45)) + scale_y_continuous(breaks = seq(0,1,.1), limits = c(0,1))
+
+age.ir.5.bin.plot <- ggplot(age.predict.IR.5.bin, aes(x = Age, y = mean)) + geom_point( color = "goldenrod3") + 
+                                                     geom_errorbar(aes(ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                                                                        width = .1, color = "goldenrod3") +
+                                                     labs(x = "Player Age", y = "Prob. of IR (> 5 weeks)") + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10)) + 
+  scale_x_continuous(breaks = seq(20,45,5), limits = c(20,45)) + scale_y_continuous(breaks = seq(0,1,.1), limits = c(0,1))
+
+
+grid.arrange(age.ir.bin.plot, age.ir.5.bin.plot, ncol = 2)
+
+```
+
+Okay, so nothing groundbreaking here, but this result does make me feel better about the analysis as a whole. The two logistic models predict that older players are 1) more likely to land on IR for any amount of time, and 2) older players are more likely to land on IR for > 5 weeks. The caveat is obviously the high uncertainty in the 95% credible intervals. While I would argue the point estimate between a 21 year old player and a 40 year old player is meaningful to fantasy football (~6-9 percent jump in the probability of either response variable), high uncertainty makes confident inference unlikely. 
+
+The figure below shows the relationships between age and the predicted number of weeks spent on IR (left panel, linear regression model) and the relationship between age and the predicted number of total season snaps (right panel). 
+
+*All other covariates held at their mean, statistical uncertainty represented by Bayes 95% credible intervals.*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+age.ir.wks.plot <- ggplot(age.predict.ir.wks, aes(x = Age, y = mean)) + geom_point( color = "mediumpurple4") + 
+                                                     geom_errorbar(aes(ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                                                                        width = .1, color = "mediumpurple4") +
+                                                     labs(x = "Player Age", y = "Weeks on IR") + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10)) + 
+  scale_x_continuous(breaks = seq(20,45,5), limits = c(20,45)) + scale_y_continuous(breaks = seq(0,3,.5), limits = c(0,3))
+
+age.snaps.plot <- ggplot(age.predict.snaps, aes(x = Age, y = mean)) + geom_point( color = "forestgreen") + 
+                                                     geom_errorbar(aes(ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                            width = .1, color = "forestgreen") +
+                                                     labs(x = "Player Age", y = "Season Snaps") + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10)) + 
+  scale_x_continuous(breaks = seq(20,45,5), limits = c(20,45)) + 
+  scale_y_continuous(breaks = seq(300,550,50), limits = c(300,550))
+
+grid.arrange(age.ir.wks.plot, age.snaps.plot, ncol = 2)
+
+```
+
+Again, definitively nothing groundbreaking here. The two Bayesian linear regression models that included player age predicted that 1) the number of weeks on IR increased by age, and 2) the total number of snaps player decreased by age. The predicted relationship between snaps player and age (left panel) is actually pretty strong, and the uncertainty is quite low (hooray, a notable result). However, that really isn't novel information. Alternatively, the predicted effect size of player age on the total weeks spent on IR is modest and paired with high uncertainty. 
+
+<font size="3">**Position**</font>
+
+Player position was also very well-supported during model selection, and included in all of the non-injury specific Bayesian models. I included all defensive and offensive positions, using the positional designations provided by PFR.
+
+The figure below shows the *predicted* probabilities of each position landing on IR for >10 weeks (green, left panel), landing on IR for >5 weeks (purple, middle panel), and landing on IR for at least 1 week (yellow, right panel). Remember, each panel represents a unique Bayes model with binomial response variables for each outcome. 
+
+A couple of notable results from this figure. 1) I was encouraged by the steady increase in the probability of each response variable, left to right on the figure. Meaning, my models predicted that landing on IR for >10 weeks was much less likely than landing on IR for >5 weeks, which was less likely than landing on IR at all. While I haven't had any groundbreaking results, this does give credibility to my models and also gives me reassurance that my response variables are working the way I want them to. 2) While there is plenty of variation in the point estimates, high uncertainty again makes strong inference difficult. However, quarterbacks are generally much less likely to land on IR for any length of time than other positions. Also, offensive linemen and tight ends seem to be the most likely to land on IR for any length of time. Outside of QB, TE, and OL, the other positions are pretty much indistinguishable due to overlap in the credible intervals.
+
+*All other covariates held at their mean, statistical uncertainty represented by Bayes 95% credible intervals.*
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+position.predict <- fitted.params %>% dplyr::filter(grepl("pos", Par)) %>% dplyr::mutate(Par.1 = Par)
+
+for (i in 1:length(position.predict$Par.1)) { 
+  
+  if(grepl("pos.0", position.predict$Par.1[i]))
+  position.predict$Par.1[i] <- as.character("DB") # I love for loops
+  
+ else if(position.predict$Par.1[i] == "pos.1[2]")
+    position.predict$Par.1[i] <- as.character("DL") 
+  
+  else if(position.predict$Par.1[i] == "pos.1[3]")
+    position.predict$Par.1[i] <- as.character("LB")
+  
+  else if(position.predict$Par.1[i] == "pos.1[4]")
+    position.predict$Par.1[i] <- as.character("OL")
+  
+  else if(position.predict$Par.1[i] == "pos.1[5]")
+    position.predict$Par.1[i] <- as.character("QB")
+  
+  else if(position.predict$Par.1[i] == "pos.1[6]")
+    position.predict$Par.1[i] <- as.character("RB")
+  
+  else if(position.predict$Par.1[i] == "pos.1[7]")
+    position.predict$Par.1[i] <- as.character("TE")
+  
+    else if(position.predict$Par.1[i] == "pos.1[8]")
+    position.predict$Par.1[i] <- as.character("WR")
+
+}
+
+binom.position <- position.predict %>% dplyr::filter(grepl("binom", Model)) %>% 
+                            ggplot(aes(x = Par.1, y = mean)) + geom_point(aes(color = Model), size = 1) + 
+                    geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = Model), alpha = 0.3, width = 0.1) + 
+                      facet_wrap(~Model, as.table = TRUE) + 
+  theme_bw() +
+  theme( panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 9), 
+        axis.title.x = element_blank(),
+  strip.background = element_blank(),
+  strip.text.x = element_blank()) + labs(y = "Prob. of IR") + 
+  scale_color_manual(breaks = c("fit_IR.10.binom", "fit_IR.5.binom", "fit_IR.binom"), 
+                     values = c("forestgreen", "mediumpurple4", 
+                                "goldenrod3"), 
+                     labels = c(">10 Weeks", ">5 Weeks", ">0 Weeks"), 
+                     name = "Response  Var.")
+
+binom.position
+
+```
+
+<font size="3">**Player Weight**</font>
+
+Next, we will look at associations between player weight and and the various IR response variables. Player weight was included in most of the Bayesian models and was well-supported throughout model selection. 
+
+The figures below show the relationship between player weight and probabilities of various IR-related response variables. The left panel shows the predicted relationships between player weight and probabilities of (purple line) landing on IR for > 0 weeks, (yellow line) landing on IR for > 5 weeks, and (blue line) landing on IR for > 10 weeks. The right panel show the predicted number of weeks spent on IR across the range of player weights in our data set (yes, there were players as light as 160 pounds), based on one of the linear regression models. 
+
+Below, and in most of the Bayesian models, player weight is negatively related to the likelihood of a player landing on IR. However, the effect size is modest, and (like all of my other results) high uncertainty makes strong inference difficult.  
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+weight.predict <- fitted.params %>% dplyr::filter(grepl("weight", Par))
+
+# Let's separate and plot the binom models 
+
+weight.binom.pred.plot <- weight.predict %>% dplyr::filter(grepl("binom", Model)) %>% 
+               dplyr::mutate(Weight = rep(rep(153:380),3)) %>% 
+                    ggplot(aes(x = Weight, y = mean)) + geom_point(aes(color = Model)) + 
+                            geom_errorbar(aes(color = Model, ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                                              width = .1) +
+  scale_color_manual(labels = c("IR > 10 Wks", "IR > 5 Wks", "IR > 0 Wks"), 
+                     values = c("steelblue1", "goldenrod1", "mediumpurple1")) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10),
+        legend.position = c(.7,.8))  + 
+            scale_y_continuous(breaks = seq(0,.3,.1), limits                                                                                                    = c(0,.3)) + 
+         labs(x = "Player Weight", y = "Prob. of IR") + 
+         scale_x_continuous(limits = c(150, 390), 
+                            breaks = c(seq(150, 390, 30)))
+
+# Separate and plot the linear models 
+
+weight.wks.pred.plot <- weight.predict %>% dplyr::filter(grepl("wks", Model)) %>% 
+               dplyr::mutate(Weight = rep(rep(153:380))) %>% 
+                   ggplot(aes(x = Weight, y = mean)) + geom_point(color = "wheat3")  + 
+                            geom_errorbar(aes(ymin = X2.5., ymax = X97.5.),alpha = 0.5,                                                                              width = .1, color = "wheat3") + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 0, size = 10),
+        legend.position = c(.7,.8))  + 
+            scale_y_continuous(breaks = seq(0,3,.5), limits                                                                                                    = c(0,3)) + 
+         labs(x = "Player Weight", y = "Weeks on IR") + 
+         scale_x_continuous(limits = c(150, 390), 
+                            breaks = c(seq(150, 390, 30)))
+
+grid.arrange(weight.binom.pred.plot, weight.wks.pred.plot, ncol = 2)
+
+
+```
+
+<font size="3">**Random Player Intercepts**</font>
+
+Interpreting the random effect seems even more important now that we know there are no strong signals from any of the fixed-effect covariates. I included random effects because I hypothesized a lot of individual heterogeneity in the probability of injury/reinjury among NFL players. Likewise, knowing whether or not that heterogeneity exists could be useful. 
+
+The figure below shows the standard deviation of the random intercepts for player ID (y-axis) from eight of the Bayesian models (x-axis). The tan points represent linear regression models, and the green points represent logit models. The y-axis needs to be interpreted on the *same scale as the response variable for each model.* For all of the logit models, the y-axis is interpreted as the standard deviation in player intercepts on the **log-odds* scale. Meaning, for all of the logit models, there was an SD of ~4.00 in the individual player intercepts. That is a meaningful amount of variation, and to me indicates that there is high individual heterogeneity in the likelihood of injury/reinjury for NFL players. 
+
+For the two linear regression models (tan) the y-axis is interpreted on the "number of weeks on IR" scale (the response variable for both of those models). Meaning, the standard deviation in random player intercepts in those models was about 4 weeks on IR. To me, this is further evidence to suggest high individual heterogeneity among players. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+player.eff <- fitted.params %>%  dplyr::filter(Par == "sigma" & !grepl("snaps", Model)) %>% 
+                              dplyr::mutate(MT = ifelse(grepl("binom", Model), "Logit", "Linear")) %>% 
+                                dplyr::arrange(MT) %>%   # Change order of Par.1 factor levels
+                              mutate(Model = factor(Model, levels = Model)) %>%
+                               dplyr::mutate(mean = ifelse(MT == "Logit", log(mean), mean), 
+                                             X97.5. = ifelse(MT == "Logit", log(X97.5.), X97.5.)) %>%
+                                ggplot(aes(y = mean, x = Model, color = MT)) + geom_point(size = 1)  + 
+                                  geom_errorbar(aes(ymin = X2.5., ymax = X97.5.), width = 0.1, alpha = 0.5) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(angle = 45, size = 10, hjust=1), 
+        legend.position = c(.15, .85), 
+        axis.title.x = element_blank())  + 
+            scale_y_continuous(breaks = seq(0,8,1), limits                                                                                                    = c(0,8)) + 
+         labs(y = "SD Random Effect", color = "Model Type") + 
+                    scale_color_manual(breaks = c("Linear", "Logit"), 
+                                       values = c("wheat3", "seagreen3")) + 
+  scale_x_discrete(labels = c("IR Wks", "IR Wks", "Log Odds", "Log Odds", "Log Odds", "Log Odds", "Log Odds", "Log Odds"))
+
+
+player.eff
+
+
+
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, eval=FALSE}
+
+# This code shows the influence of prev.ir.5 covariate on currir.5 response from the logit Bayes model. 
+
+# Not included in markdown because point estimates are indistinguishable and uninformative. 
+
+five.predict <- fitted.params %>% dplyr::filter(grepl(".5.bin", Model)) %>% 
+                                    dplyr::filter(grepl("prev.IR.5.predict", Par)) %>%
+                          dplyr::mutate(IR.5 = c("0", "1")) %>% 
+                  ggplot(aes(x = IR.5, y = mean)) + geom_point(aes(color = IR.5)) + 
+        geom_errorbar(aes(ymin = X2.5., ymax = X97.5., color = IR.5), width = 0.1, alpha = 0.5)  + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        axis.text=element_text(size=10,face="bold"),
+        axis.title = element_text(size=11,face="bold" ), 
+        axis.text.x = element_text(size = 10), 
+        legend.position = "false", 
+        axis.title.x = element_blank())  + 
+            scale_y_continuous(breaks = seq(0,0.2,.05), limits                                                                                                    = c(0,0.2)) + 
+         labs(y = "Prob. of IR >5 Weeks") + 
+                    scale_color_manual(breaks = c("0", "1"), 
+                                       values = c("wheat3", "seagreen3"))
+
+five.predict
+
+```
+
+# Discussion
+
+Overall, there were no overwhelming signals in this analysis to indicate any factors as being the most important to injury and reinjury in the NFL. However, sometimes a "lack of results" is in of itself a useful result.
+
+### Model Selection 
+
+Thus far, I have focused on which covariates were best-supported during model selection. However, it's also important to recognize and discuss which covariates **were not** well-supported during model selection, as those are important results in this case. 
+
+The most surprising result to me was the total and complete lack of support for the "previous seasons IR" covariates during model selection. Regardless of the response variable (binomial IR responses for >0 weeks on IR, >5 weeks, >10 weeks, total weeks on IR, etc.), **covariates describing the amount of time a player spent on IR in the previous season had almost zero bearing on their likelihood of landing on IR in the next season.** Meaning, *in general*, my analysis suggests that a player's previous IR status is not a good predictor of their future IR status. To me, this result does not suggest that there are zero injury-prone NFL players, and certainly the high variability in player intercepts suggests that there likely are injury-prone players. But, those players may be the exception to the rule, which could partially explain why injury is so hard to predict. Really the only IR-related covariate that was well-supported during model selection was the "last week on IR in the previous season" covariate, which described how late into the previous season a player remained on IR. 
+
+Another surprising set of results was the lack of support for the binomial shoulder, groin, foot, and Achilles covariates in the injury-specific models, which suggests that those specific injuries suffered in the previous season had less bearing on a player landing on IR in the subsequent season than the spine, knee, and hamstring injury covariates. I was particularly surprised that the Achilles covariate had such little support. While the Achilles covariate did make it through to Bayes modeling in one injury-specific model, the effect size was minimal and uninformative. 
+
+### Effect Sizes
+
+The biggest takeaway from examining the specific Bayesian models and covariate effect-sizes was basically that there are no easy answers in predicting injury. Yes, most models suggested that older players, lighter players, tight ends, and offensive linemen are more likely to get injured, but the effect-sizes are simply too small and the uncertainty is too high to warrant any confident inference. Regardless, those results trend in the directions that I would expect. I would expect QBs to be less likely to get injured/reinjured. I would expect older players to be more injury prone, and I guess that I would expect the lightest players to get knocked around more and possibly injured more. While these results aren't necessarily useful for prediction and inference, it does give me confidence in the models that the betas are predicting logical outcomes for these covariates. 
+
+Similar to age, weight, and position, the IR and injury-specific covariates that made it through to the Bayesian modeling were associated with modest effect sizes. Perhaps the most interesting result was the positive, and dare I say moderate, relationship between the last week spent on IR during the previous season and the predicted number of weeks on IR in the subsequent season. However, even that model predicted just one extra week on IR for a player who had spent zero weeks on IR in the previous season, when compared to a player who spent 21 weeks on IR in the previous season (includes playoffs). Likewise, Bayes models that included the injury-specific covariates predicted just a ~0.1 to 0.5 percent increase in the probability of various IR response variables for players who suffered knee, hamstring, or spine injury during the previous season when compared to players who suffered no IR-related injuries in the previous season. So, yes some of the IR covariates and IR-related injury covariates were well-supported during model selection, but the effect sizes don't tell us much. 
+
+# Takeaways
+
+Here are my big takeaways from the analysis. 
+
+1) Individual heterogeneity explains a ton of variation in the probability of injury/reinjury in NFL players. The random player intercepts do suggests that some players are injury prone and also that the log odds of reinjury following seasons on IR are high for certain players. Alternatively, this analysis also suggests that other players may not be injury prone and that their injury history is unrelated to the probability of future injury. 
+
+2) Due to high individual heterogeneity in injury/reinjury probability for NFL players, the risk of reinjury probably needs to be assessed on a player-by-player basis.
+
+3) Certain factors appear to make players more susceptible to reinjury. Older players appear more likely to suffer injury in general, as do tight ends and offensive linemen, and possibly undersized players. However, these factors should be used as general guidelines to augment the study of specific players and not as hard-and-fast rules. 
+
+4) Players who were on IR at the end of the previous season, specifically with spine, knee, and hamstring injuries, have a higher risk of reinjury than other players. BUT, the increase in the probability of reinjury due to these factors is low, and again should only be used to augment the consideration of specific players. 
+
+5) Across the board, landing on IR in the previous season for any length of time (even 10 weeks) was not related to increased probability of IR stints in the subsequent season. This suggests that it may be worth taking a risk on a previously injury player with low stock. But again, individual heterogeneity makes confident inference difficult. 
+
+6) I found no easy rules regarding player injury and how a player's injury history relates to their probability of future injury. In fact, my models suggested the opposite. There is so much individual variation in injury/reinjury probability between players as to make accurately predicting the factors most related to injury very difficult and vague. 
+
+# Limitations
+
+This analysis has many limitations and opportunities for future improvement. 
+
+1) No Interactions - I did not include any interactions in the fixed-effects portion of my models. There are obvious and logical interactions to be included between player age and just about every other covariate I included, between the injury-specific covariates and the IR covariates, etc. etc.
+
+2) IR vs. Inactive - This is one I really regret, but I was too far down the rabbit hole to turn back. Because the purpose of this analysis was to identify factors related to NFL players missing time to injury, I chose to build covariates and response variables using the number of games spent on IR in each season. However, the data I used also included a basic, inactive vs. active column. Obviously players sometimes miss games and are not put on IR, and I limited my sample size by using IR/non-IR vs. active/inactive data. 
+
+3) Grouped Injuries - For the injury-specific models and covariates, I grouped injuries by body part. Certainly there are more or less serious knee injuries, and more or less serious spine injuries. It is entirely possible that I watered-down the influence of the most serious injuries on the risk of reinjury by lumping them together with lesser injuries. A future analysis should include more specific injury information, such as MCL tear, ACL tear, torn Achilles, etc. However, doing so will severely limit the "ones" in a binomial injury covariate. 
+
+4) Obvious Correlation - I did try and keep this document reasonably short, and therefore skipped over a lot of the finer details such as examining the actual model coefficients, model fit, and correlation among covariates. Because of the way they were constructed, there was tons of correlation between the IR covariates. For example, the binomial covariates describing whether a player was on IR for >0, >5, or >10 weeks in the previous season were correlated with each other and also with the covariate describing the total number of weeks on IR for the previous season. Fortunately, the IR covariates barely made it into the Bayesian modeling and were not well-supported during model selection. So, I did not have to deal with this correlation much when examining the Bayes models and coefficients. 
+
+Thanks for reading!! 
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
+
+```{r, echo = FALSE, results = 'hide', message = FALSE, warning = FALSE}
+
+```
